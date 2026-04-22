@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date as _date
 from datetime import datetime
 from datetime import time as _time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -22,9 +22,12 @@ from sqlalchemy import (
     Time,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.user_app.models import User
 
 
 class _TimestampMixin:
@@ -58,6 +61,8 @@ class Presence(_TimestampMixin, Base):
     scan_type: Mapped[str] = mapped_column(String(16), nullable=False)
     is_late: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    user: Mapped["User"] = relationship("User", lazy="select")
+
     __table_args__ = (
         UniqueConstraint(
             "user_id", "date_scan", "scan_type", name="uq_presence_user_day_type"
@@ -87,3 +92,5 @@ class WorkSchedule(_TimestampMixin, Base):
     end_time: Mapped[_time] = mapped_column(Time, nullable=False)
     break_start: Mapped[Optional[_time]] = mapped_column(Time, nullable=True)
     break_end: Mapped[Optional[_time]] = mapped_column(Time, nullable=True)
+
+    user: Mapped[Optional["User"]] = relationship("User", lazy="select")

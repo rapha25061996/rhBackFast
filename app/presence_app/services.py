@@ -14,6 +14,7 @@ from typing import Iterable, Optional
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.query_utils import apply_expansion
 from app.presence_app.constants import (
     DEFAULT_END_TIME,
     DEFAULT_START_TIME,
@@ -152,6 +153,7 @@ class PresenceService:
         limit: int = 100,
         user_id: Optional[int] = None,
         on_date: Optional[_date] = None,
+        expand_fields: Optional[list[str]] = None,
     ) -> tuple[list[Presence], int]:
         base = select(Presence)
         count_stmt = select(func.count()).select_from(Presence)
@@ -168,8 +170,31 @@ class PresenceService:
             .offset(skip)
             .limit(limit)
         )
+        if expand_fields:
+            stmt = apply_expansion(stmt, Presence, expand_fields)
         items = list((await db.execute(stmt)).scalars().all())
         return items, total
+
+    @staticmethod
+    async def _load_users(
+        db: AsyncSession,
+        user_ids: list[int],
+        expand_fields: Optional[list[str]] = None,
+    ) -> list[User]:
+        """Load :class:`User` rows for the given ids, preserving id order.
+
+        Supports optional eager loading through the shared ``expand`` helper
+        (same syntax accepted by every other module: ``employe``,
+        ``employe.poste``, etc.).
+        """
+        if not user_ids:
+            return []
+        stmt = select(User).where(User.id.in_(user_ids))
+        if expand_fields:
+            stmt = apply_expansion(stmt, User, expand_fields)
+        rows = list((await db.execute(stmt)).scalars().all())
+        by_id = {u.id: u for u in rows}
+        return [by_id[uid] for uid in user_ids if uid in by_id]
 
     @staticmethod
     async def _distinct_user_ids_for_day(
@@ -187,22 +212,41 @@ class PresenceService:
         return sorted(int(r) for r in rows)
 
     @classmethod
-    async def presence_today(cls, db: AsyncSession, day: _date) -> tuple[_date, list[int]]:
+    async def presence_today(
+        cls,
+        db: AsyncSession,
+        day: _date,
+        expand_fields: Optional[list[str]] = None,
+    ) -> tuple[_date, list[User]]:
         user_ids = await cls._distinct_user_ids_for_day(db, day)
-        return day, user_ids
+        users = await cls._load_users(db, user_ids, expand_fields=expand_fields)
+        return day, users
 
     @classmethod
-    async def late_today(cls, db: AsyncSession, day: _date) -> tuple[_date, list[int]]:
+    async def late_today(
+        cls,
+        db: AsyncSession,
+        day: _date,
+        expand_fields: Optional[list[str]] = None,
+    ) -> tuple[_date, list[User]]:
         user_ids = await cls._distinct_user_ids_for_day(db, day, only_late=True)
-        return day, user_ids
+        users = await cls._load_users(db, user_ids, expand_fields=expand_fields)
+        return day, users
 
     @classmethod
-    async def absence_today(cls, db: AsyncSession, day: _date) -> tuple[_date, list[int]]:
+    async def absence_today(
+        cls,
+        db: AsyncSession,
+        day: _date,
+        expand_fields: Optional[list[str]] = None,
+    ) -> tuple[_date, list[User]]:
         present_stmt = select(Presence.user_id).where(Presence.date_scan == day).distinct()
         present_ids = {int(r) for r in (await db.execute(present_stmt)).scalars().all()}
         active_stmt = select(User.id).where(User.is_active.is_(True))
         all_ids = {int(r) for r in (await db.execute(active_stmt)).scalars().all()}
-        return day, sorted(all_ids - present_ids)
+        ordered_ids = sorted(all_ids - present_ids)
+        users = await cls._load_users(db, ordered_ids, expand_fields=expand_fields)
+        return day, users
 
     @staticmethod
     def _iter_days(start: _date, end: _date) -> Iterable[_date]:
@@ -213,7 +257,36 @@ class PresenceService:
             current += timedelta(days=1)
 
     @classmethod
-    async def presence_range(cls, db, start, end):
+    async def _resolve_range(
+        cls,
+        db: AsyncSession,
+        per_day_ids: dict[_date, set[int]],
+        start: _date,
+        end: _date,
+        expand_fields: Optional[list[str]] = None,
+    ) -> list[tuple[_date, list[User]]]:
+        # Fetch every user that appears at least once in the range in a single
+        # query, then redistribute back by day. Keeps the statistics endpoints
+        # O(unique_users) instead of O(days × users).
+        all_ids = sorted({uid for ids in per_day_ids.values() for uid in ids})
+        users = await cls._load_users(db, all_ids, expand_fields=expand_fields)
+        users_by_id = {u.id: u for u in users}
+        return [
+            (
+                day,
+                [users_by_id[uid] for uid in sorted(per_day_ids.get(day, set())) if uid in users_by_id],
+            )
+            for day in cls._iter_days(start, end)
+        ]
+
+    @classmethod
+    async def presence_range(
+        cls,
+        db,
+        start,
+        end,
+        expand_fields: Optional[list[str]] = None,
+    ):
         stmt = (
             select(Presence.date_scan, Presence.user_id)
             .where(and_(Presence.date_scan >= start, Presence.date_scan <= end))
@@ -223,10 +296,16 @@ class PresenceService:
         per_day: dict = {d: set() for d in cls._iter_days(start, end)}
         for day, uid in rows:
             per_day.setdefault(day, set()).add(int(uid))
-        return [(day, sorted(per_day[day])) for day in cls._iter_days(start, end)]
+        return await cls._resolve_range(db, per_day, start, end, expand_fields=expand_fields)
 
     @classmethod
-    async def late_range(cls, db, start, end):
+    async def late_range(
+        cls,
+        db,
+        start,
+        end,
+        expand_fields: Optional[list[str]] = None,
+    ):
         stmt = (
             select(Presence.date_scan, Presence.user_id)
             .where(
@@ -243,10 +322,16 @@ class PresenceService:
         per_day: dict = {d: set() for d in cls._iter_days(start, end)}
         for day, uid in rows:
             per_day.setdefault(day, set()).add(int(uid))
-        return [(day, sorted(per_day[day])) for day in cls._iter_days(start, end)]
+        return await cls._resolve_range(db, per_day, start, end, expand_fields=expand_fields)
 
     @classmethod
-    async def absence_range(cls, db, start, end):
+    async def absence_range(
+        cls,
+        db,
+        start,
+        end,
+        expand_fields: Optional[list[str]] = None,
+    ):
         active_stmt = select(User.id).where(User.is_active.is_(True))
         all_ids = {int(r) for r in (await db.execute(active_stmt)).scalars().all()}
         presence_stmt = (
@@ -258,7 +343,8 @@ class PresenceService:
         present_per_day: dict = {d: set() for d in cls._iter_days(start, end)}
         for day, uid in rows:
             present_per_day.setdefault(day, set()).add(int(uid))
-        return [
-            (day, sorted(all_ids - present_per_day[day]))
+        per_day: dict = {
+            day: all_ids - present_per_day.get(day, set())
             for day in cls._iter_days(start, end)
-        ]
+        }
+        return await cls._resolve_range(db, per_day, start, end, expand_fields=expand_fields)
