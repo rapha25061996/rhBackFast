@@ -1264,6 +1264,14 @@ async def stats_global(
     expand: Optional[str] = Query(
         None, description="Relations utilisateur. Exemples: employe, employe.poste"
     ),
+    include_daily_details: bool = Query(
+        True,
+        description=(
+            "Ajouter sur chaque per_user le champ 'details' (statut jour "
+            "par jour sur la période). Mettre à false pour alléger la "
+            "réponse (utile en annuel)."
+        ),
+    ),
 ):
     """Statistiques globales (présence, absence, retards) par utilisateur.
 
@@ -1271,24 +1279,40 @@ async def stats_global(
       - ``presence_count``: jours avec au moins un scan ENTRY.
       - ``absence_total_count``: jours de la période sans aucun scan.
       - ``absence_justified_count``: absences couvertes par une déclaration
-        d'absence ``APPROVED``.
+        d'absence.
       - ``absence_unjustified_count``: complément.
       - ``late_total_count``: scans ENTRY marqués en retard.
       - ``late_declared_count``: retards couverts par une déclaration de
-        retard ``APPROVED`` pour le même jour.
+        retard pour le même jour.
       - ``late_undeclared_count``: complément.
       - ``total_minutes_late``: somme des minutes de retard.
+
+    Quand ``include_daily_details=true`` (défaut), chaque ``per_user`` expose
+    aussi un objet ``details`` indexé par date au format::
+
+        {"absent": "oui"|"non",
+         "absence_justifiee": "oui"|"non",
+         "retard": "non"|"oui"|"oui (N min)"}
+
+    ``retard`` vaut ``"oui"`` pour un retard déclaré, ``"oui (N min)"``
+    pour un retard non déclaré (``N`` = minutes), ``"non"`` sinon.
 
     Par défaut, toutes les personnes actives sont retournées. Utilisez
     ``user_id`` pour filtrer sur un utilisateur spécifique.
     """
     range_start, range_end = _compute_global_range(period, reference_date, start, end)
-    ordered_user_ids, stats, users_by_id = await GlobalStatsService.compute(
+    (
+        ordered_user_ids,
+        stats,
+        users_by_id,
+        details_by_user,
+    ) = await GlobalStatsService.compute(
         db,
         start=range_start,
         end=range_end,
         user_id=user_id,
         expand_fields=_parse_user_expand(expand),
+        with_daily_details=include_daily_details,
     )
 
     totals = GlobalStatTotals()
@@ -1314,6 +1338,7 @@ async def stats_global(
         per_user.append(
             GlobalUserStat(
                 user=UserSummary.model_validate(user),
+                details=details_by_user.get(uid) if include_daily_details else None,
                 **row,
             )
         )
@@ -1323,6 +1348,7 @@ async def stats_global(
         start=range_start,
         end=range_end,
         filter_user_id=user_id,
+        include_daily_details=include_daily_details,
         totals=totals,
         per_user=per_user,
     )

@@ -1124,8 +1124,23 @@ class GlobalStatsService:
         end: _date,
         user_id: Optional[int] = None,
         expand_fields: Optional[list[str]] = None,
-    ) -> tuple[list[int], dict[int, dict[str, int]], dict[int, "User"]]:
-        """Return ``(ordered_user_ids, stats_by_user, users_by_id)``."""
+        with_daily_details: bool = False,
+    ) -> tuple[
+        list[int],
+        dict[int, dict[str, int]],
+        dict[int, "User"],
+        dict[int, dict[_date, dict[str, str]]],
+    ]:
+        """Return ``(ordered_user_ids, stats_by_user, users_by_id, details_by_user)``.
+
+        ``details_by_user`` is empty when ``with_daily_details`` is ``False``.
+        When enabled, ``details_by_user[uid][day]`` holds a compact
+        human-readable status for that (user, day) pair::
+
+            {"absent": "oui"|"non",
+             "absence_justifiee": "oui"|"non",
+             "retard": "non"|"oui"|"oui (N min)"}
+        """
         (
             ordered_user_ids,
             presence_days,
@@ -1135,13 +1150,15 @@ class GlobalStatsService:
             all_days,
         ) = await cls._load_raw(db, start=start, end=end, user_id=user_id)
         if not ordered_user_ids:
-            return [], {}, {}
+            return [], {}, {}, {}
 
         total_days = len(all_days)
         all_days_set = set(all_days)
         stats: dict[int, dict[str, int]] = {
             uid: cls._empty_counters() for uid in ordered_user_ids
         }
+        details_by_user: dict[int, dict[_date, dict[str, str]]] = {}
+
         for uid in ordered_user_ids:
             present = presence_days[uid]
             justified = justified_days[uid]
@@ -1166,10 +1183,29 @@ class GlobalStatsService:
             stats[uid]["late_undeclared_count"] = late_total - declared_late_matches
             stats[uid]["total_minutes_late"] = total_minutes
 
+            if with_daily_details:
+                user_details: dict[_date, dict[str, str]] = {}
+                for d in all_days:
+                    is_absent = d not in present
+                    is_justified = is_absent and d in justified
+                    if d in minutes_by_day:
+                        if d in declared_late:
+                            retard = "oui"
+                        else:
+                            retard = f"oui ({minutes_by_day[d]} min)"
+                    else:
+                        retard = "non"
+                    user_details[d] = {
+                        "absent": "oui" if is_absent else "non",
+                        "absence_justifiee": "oui" if is_justified else "non",
+                        "retard": retard,
+                    }
+                details_by_user[uid] = user_details
+
         users_by_id = await cls._load_users(
             db, ordered_user_ids, expand_fields=expand_fields
         )
-        return ordered_user_ids, stats, users_by_id
+        return ordered_user_ids, stats, users_by_id, details_by_user
 
     @classmethod
     async def compute_detailed(
