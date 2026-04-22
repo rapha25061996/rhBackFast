@@ -1,0 +1,35 @@
+# name: FastAPI CI/CD
+
+# on:
+#   push:
+#     branches:
+#       - master
+
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-22.04
+
+#     steps:
+#     - name: Checkout repository
+#       uses: actions/checkout@v4
+
+#     - name: Deploy to Ubuntu Server
+#       uses: appleboy/ssh-action@v1.0.3
+#       with:
+#         host: ${{ secrets.HOST }}
+#         username: ${{ secrets.USERNAME }}
+#         key: ${{ secrets.KEY }}
+#         passphrase: ${{ secrets.PASSPHRASE }}
+#         port: ${{ secrets.PORT }}
+#         script: |
+#           set -e
+#           export PATH="/home/rapha/.local/bin:$PATH"
+#           cd ${{ secrets.REMOTE_PATH_PROJECT }}
+#           # Deploy target: always align with origin/master, never keep
+#           # local divergent commits. `git pull` can fail with "divergent
+#           # branches" if past deploys created accidental merge commits.
+#           git fetch origin master
+#           git reset --hard origin/master
+#           uv sync
+#           echo "${{ secrets.PASSPHRASE }}" | sudo -S systemctl restart fastapi_uv
+#           sleep 3
