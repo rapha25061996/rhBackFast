@@ -2,11 +2,45 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.presence_app.constants import ScanMethod, ScanType
+
+
+# ---------------------------------------------------------------------------
+# Nested user summary (lightweight User representation used when expanding)
+# ---------------------------------------------------------------------------
+
+
+class UserSummary(BaseModel):
+    """Minimal user payload returned whenever a presence endpoint exposes a
+    related user. It is intentionally decoupled from :class:`UserResponse` in
+    ``user_app.schemas`` to avoid circular imports and to give the caller only
+    the fields they need. Additional relations can still be loaded via the
+    ``expand`` query parameter on each endpoint.
+    """
+
+    id: int
+    email: Optional[str] = None
+    nom: Optional[str] = None
+    prenom: Optional[str] = None
+    phone: Optional[str] = None
+    photo: Optional[str] = None
+    is_active: Optional[bool] = None
+    is_superuser: Optional[bool] = None
+    is_staff: Optional[bool] = None
+    employe_id: Optional[int] = None
+
+    # Free-form nested relations populated by SQLAlchemy when the caller uses
+    # ``expand=user.employe`` (or similar). We expose them as generic ``Any``
+    # to keep this schema light while still letting the serializer include
+    # eagerly loaded relationships.
+    employe: Optional[Any] = None
+    user_groups: Optional[list[Any]] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +58,11 @@ class PresenceResponse(BaseModel):
     is_late: bool
     created_at: datetime
     updated_at: datetime
+
+    # Populated when the caller adds ``expand=user`` (or nested paths such as
+    # ``expand=user.employe``). Always optional so non-expanded responses stay
+    # small.
+    user: Optional[UserSummary] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -103,7 +142,17 @@ class WorkScheduleResponse(WorkScheduleBase):
     created_at: datetime
     updated_at: datetime
 
+    # Populated when the caller adds ``expand=user`` (or nested paths).
+    user: Optional[UserSummary] = None
+
     model_config = ConfigDict(from_attributes=True)
+
+
+class PaginatedWorkSchedule(BaseModel):
+    items: list[WorkScheduleResponse]
+    total: int
+    skip: int
+    limit: int
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +163,10 @@ class WorkScheduleResponse(WorkScheduleBase):
 class DailyStat(BaseModel):
     date: date
     count: int
-    user_ids: list[int]
+    # Full user objects matching the day. ``user_ids`` is kept for backwards
+    # compatibility but is always derived from ``users``.
+    users: list[UserSummary] = Field(default_factory=list)
+    user_ids: list[int] = Field(default_factory=list)
 
 
 class RangeStatResponse(BaseModel):
@@ -127,4 +179,5 @@ class RangeStatResponse(BaseModel):
 class TodayStatResponse(BaseModel):
     date: date
     count: int
-    user_ids: list[int]
+    users: list[UserSummary] = Field(default_factory=list)
+    user_ids: list[int] = Field(default_factory=list)

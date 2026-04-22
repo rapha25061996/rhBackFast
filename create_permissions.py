@@ -19,6 +19,7 @@ from app.user_app import models as user_models  # noqa: F401
 from app.paie_app import models as paie_models  # noqa: F401
 from app.audit_app import models as audit_models  # noqa: F401
 from app.conge_app import models as conge_models  # noqa: F401
+from app.presence_app import models as presence_models  # noqa: F401
 
 
 # Model to resource name mapping (customize as needed)
@@ -42,6 +43,8 @@ MODEL_RESOURCE_MAPPING = {
     "StatutProcessus": "conge_statut",
     "EtapeProcessus": "conge_etape",
     "ActionEtapeProcessus": "conge_action",
+    "Presence": "presence",
+    "WorkSchedule": "work_schedule",
 }
 
 # Actions to create for each model
@@ -68,6 +71,8 @@ CONTENT_TYPE_MAPPING = {
     "conge_statut": 17,
     "conge_etape": 18,
     "conge_action": 19,
+    "presence": 20,
+    "work_schedule": 21,
 }
 
 
@@ -230,6 +235,17 @@ async def create_permissions_for_models():
                 "resource": "conge",
                 "action": "EXPORT",
                 "description": "Permission to export leave data"
+            },
+            {
+                "codename": "presence.view_stats",
+                "name": "View Presence Statistics",
+                "content_type": 0,
+                "resource": "presence",
+                "action": "VIEW_STATS",
+                "description": (
+                    "Permission to view aggregated presence / late / absence "
+                    "statistics (today and range)"
+                ),
             },
         ]
 
