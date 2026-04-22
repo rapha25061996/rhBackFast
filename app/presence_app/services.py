@@ -6,6 +6,7 @@ the rules are easy to audit.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date as _date
 from datetime import datetime
 from datetime import time as _time
@@ -23,6 +24,28 @@ from app.presence_app.constants import (
 )
 from app.presence_app.models import Presence, WorkSchedule
 from app.user_app.models import User
+
+
+@dataclass(frozen=True)
+class LateEntry:
+    """Per-user, per-day late information exposed to the routes layer."""
+
+    user: "User"
+    date_scan: _date
+    heure_scan: _time
+    scheduled_start: _time
+    minutes_late: int
+
+
+def _minutes_between(earlier: _time, later: _time) -> int:
+    """Return the integer minute delta between two ``time`` instances.
+
+    Negative deltas are clamped to 0 because late presence can only happen
+    *after* the scheduled start.
+    """
+    anchor = datetime(2000, 1, 1)
+    delta = datetime.combine(anchor.date(), later) - datetime.combine(anchor.date(), earlier)
+    return max(0, int(delta.total_seconds() // 60))
 
 
 class PresenceError(Exception):
@@ -47,6 +70,30 @@ DEFAULT_SCHEDULE_END = _parse_time(DEFAULT_END_TIME)
 
 class WorkScheduleService:
     """Read helpers for :class:`WorkSchedule`."""
+
+    @staticmethod
+    async def get_start_time_map(
+        db: AsyncSession,
+    ) -> tuple[dict[int, _time], _time]:
+        """Return ``(per_user_start_time, default_start_time)``.
+
+        Fetches every work schedule row once and builds:
+          - ``per_user``: ``{user_id: start_time}`` for overrides.
+          - ``default``: the global start time (row with ``user_id IS NULL``)
+            or the hard-coded :data:`DEFAULT_SCHEDULE_START` when none exists.
+
+        Used by late-statistics computations to avoid N+1 lookups.
+        """
+        stmt = select(WorkSchedule.user_id, WorkSchedule.start_time)
+        rows = (await db.execute(stmt)).all()
+        per_user: dict[int, _time] = {}
+        default: _time = DEFAULT_SCHEDULE_START
+        for user_id, start_time in rows:
+            if user_id is None:
+                default = start_time
+            else:
+                per_user[int(user_id)] = start_time
+        return per_user, default
 
     @staticmethod
     async def get_effective_schedule(
@@ -228,10 +275,48 @@ class PresenceService:
         db: AsyncSession,
         day: _date,
         expand_fields: Optional[list[str]] = None,
-    ) -> tuple[_date, list[User]]:
-        user_ids = await cls._distinct_user_ids_for_day(db, day, only_late=True)
+    ) -> tuple[_date, list[LateEntry]]:
+        """Return the late ENTRY scans for ``day`` with their minute delta.
+
+        Each user may have at most one ENTRY scan per day, so the returned
+        list contains one :class:`LateEntry` per user who was late.
+        """
+        stmt = (
+            select(Presence.user_id, Presence.heure_scan, Presence.date_scan)
+            .where(
+                and_(
+                    Presence.date_scan == day,
+                    Presence.scan_type == ScanType.ENTRY.value,
+                    Presence.is_late.is_(True),
+                )
+            )
+            .order_by(Presence.user_id.asc())
+        )
+        rows = list((await db.execute(stmt)).all())
+        user_ids = sorted({int(r.user_id) for r in rows})
         users = await cls._load_users(db, user_ids, expand_fields=expand_fields)
-        return day, users
+        users_by_id = {u.id: u for u in users}
+
+        per_user_starts, default_start = await WorkScheduleService.get_start_time_map(db)
+
+        entries: list[LateEntry] = []
+        for row in rows:
+            uid = int(row.user_id)
+            user = users_by_id.get(uid)
+            if user is None:
+                continue
+            scheduled_start = per_user_starts.get(uid, default_start)
+            entries.append(
+                LateEntry(
+                    user=user,
+                    date_scan=row.date_scan,
+                    heure_scan=row.heure_scan,
+                    scheduled_start=scheduled_start,
+                    minutes_late=_minutes_between(scheduled_start, row.heure_scan),
+                )
+            )
+        entries.sort(key=lambda e: (-e.minutes_late, e.user.id))
+        return day, entries
 
     @classmethod
     async def absence_today(
@@ -301,13 +386,14 @@ class PresenceService:
     @classmethod
     async def late_range(
         cls,
-        db,
-        start,
-        end,
+        db: AsyncSession,
+        start: _date,
+        end: _date,
         expand_fields: Optional[list[str]] = None,
-    ):
+    ) -> list[tuple[_date, list[LateEntry]]]:
+        """Return, per day in the range, the late ENTRY scans with minute delta."""
         stmt = (
-            select(Presence.date_scan, Presence.user_id)
+            select(Presence.user_id, Presence.date_scan, Presence.heure_scan)
             .where(
                 and_(
                     Presence.date_scan >= start,
@@ -316,13 +402,40 @@ class PresenceService:
                     Presence.is_late.is_(True),
                 )
             )
-            .distinct()
+            .order_by(Presence.date_scan.asc(), Presence.user_id.asc())
         )
-        rows = (await db.execute(stmt)).all()
-        per_day: dict = {d: set() for d in cls._iter_days(start, end)}
-        for day, uid in rows:
-            per_day.setdefault(day, set()).add(int(uid))
-        return await cls._resolve_range(db, per_day, start, end, expand_fields=expand_fields)
+        rows = list((await db.execute(stmt)).all())
+        user_ids = sorted({int(r.user_id) for r in rows})
+        users = await cls._load_users(db, user_ids, expand_fields=expand_fields)
+        users_by_id = {u.id: u for u in users}
+
+        per_user_starts, default_start = await WorkScheduleService.get_start_time_map(db)
+
+        entries_per_day: dict[_date, list[LateEntry]] = {
+            d: [] for d in cls._iter_days(start, end)
+        }
+        for row in rows:
+            uid = int(row.user_id)
+            user = users_by_id.get(uid)
+            if user is None:
+                continue
+            scheduled_start = per_user_starts.get(uid, default_start)
+            entries_per_day.setdefault(row.date_scan, []).append(
+                LateEntry(
+                    user=user,
+                    date_scan=row.date_scan,
+                    heure_scan=row.heure_scan,
+                    scheduled_start=scheduled_start,
+                    minutes_late=_minutes_between(scheduled_start, row.heure_scan),
+                )
+            )
+
+        result: list[tuple[_date, list[LateEntry]]] = []
+        for day in cls._iter_days(start, end):
+            day_entries = entries_per_day.get(day, [])
+            day_entries.sort(key=lambda e: (-e.minutes_late, e.user.id))
+            result.append((day, day_entries))
+        return result
 
     @classmethod
     async def absence_range(
