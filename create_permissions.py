@@ -45,6 +45,10 @@ MODEL_RESOURCE_MAPPING = {
     "ActionEtapeProcessus": "conge_action",
     "Presence": "presence",
     "WorkSchedule": "work_schedule",
+    "AbsenceDeclaration": "absence_declaration",
+    "LateDeclaration": "late_declaration",
+    "PrAbsenceType": "absence_type",
+    "PrLateReasonType": "late_reason_type",
 }
 
 # Actions to create for each model
@@ -73,6 +77,10 @@ CONTENT_TYPE_MAPPING = {
     "conge_action": 19,
     "presence": 20,
     "work_schedule": 21,
+    "absence_declaration": 22,
+    "late_declaration": 23,
+    "absence_type": 24,
+    "late_reason_type": 25,
 }
 
 
