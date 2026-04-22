@@ -181,3 +181,51 @@ class TodayStatResponse(BaseModel):
     count: int
     users: list[UserSummary] = Field(default_factory=list)
     user_ids: list[int] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Late statistics (includes the minutes-late delta per user per day)
+# ---------------------------------------------------------------------------
+
+
+class LateUserStat(BaseModel):
+    """Per-user late information for a given day.
+
+    ``minutes_late`` is the difference, in minutes, between the ENTRY scan
+    time and the user's effective schedule start time (per-user override or
+    global default). It is always ``>= 0`` because only late entries are
+    returned here.
+    """
+
+    user: UserSummary
+    minutes_late: int = Field(..., ge=0)
+    heure_scan: time
+    scheduled_start: time
+    date_scan: date
+
+
+class LateTodayStatResponse(BaseModel):
+    date: date
+    count: int
+    users: list[LateUserStat] = Field(default_factory=list)
+    user_ids: list[int] = Field(default_factory=list)
+    # Aggregated summary to help dashboards without re-iterating `users`.
+    total_minutes_late: int = Field(default=0, ge=0)
+    average_minutes_late: float = Field(default=0.0, ge=0)
+
+
+class LateDailyStat(BaseModel):
+    date: date
+    count: int
+    users: list[LateUserStat] = Field(default_factory=list)
+    user_ids: list[int] = Field(default_factory=list)
+    total_minutes_late: int = Field(default=0, ge=0)
+    average_minutes_late: float = Field(default=0.0, ge=0)
+
+
+class LateRangeStatResponse(BaseModel):
+    start: date
+    end: date
+    total: int
+    total_minutes_late: int = Field(default=0, ge=0)
+    per_day: list[LateDailyStat]

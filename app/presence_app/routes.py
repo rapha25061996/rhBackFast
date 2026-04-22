@@ -15,6 +15,10 @@ from app.core.query_utils import apply_expansion, parse_expand_param
 from app.presence_app.models import WorkSchedule
 from app.presence_app.schemas import (
     DailyStat,
+    LateDailyStat,
+    LateRangeStatResponse,
+    LateTodayStatResponse,
+    LateUserStat,
     PaginatedPresence,
     PaginatedWorkSchedule,
     PresenceResponse,
@@ -28,6 +32,7 @@ from app.presence_app.schemas import (
     WorkScheduleUpdate,
 )
 from app.presence_app.services import (
+    LateEntry,
     MaxScansReachedError,
     PresenceService,
     UserNotFoundError,
@@ -95,6 +100,63 @@ def _build_range_response(
         )
     total = sum(s.count for s in per_day)
     return RangeStatResponse(start=start, end=end, total=total, per_day=per_day)
+
+
+def _late_entry_to_stat(entry: LateEntry) -> LateUserStat:
+    return LateUserStat(
+        user=UserSummary.model_validate(entry.user),
+        minutes_late=entry.minutes_late,
+        heure_scan=entry.heure_scan,
+        scheduled_start=entry.scheduled_start,
+        date_scan=entry.date_scan,
+    )
+
+
+def _build_late_today_response(
+    day: _date, entries: list[LateEntry]
+) -> LateTodayStatResponse:
+    stats = [_late_entry_to_stat(e) for e in entries]
+    total_minutes = sum(s.minutes_late for s in stats)
+    avg_minutes = (total_minutes / len(stats)) if stats else 0.0
+    return LateTodayStatResponse(
+        date=day,
+        count=len(stats),
+        users=stats,
+        user_ids=[s.user.id for s in stats],
+        total_minutes_late=total_minutes,
+        average_minutes_late=round(avg_minutes, 2),
+    )
+
+
+def _build_late_range_response(
+    start: _date, end: _date, data: list[tuple[_date, list[LateEntry]]]
+) -> LateRangeStatResponse:
+    per_day: list[LateDailyStat] = []
+    grand_total_minutes = 0
+    grand_total_count = 0
+    for day, entries in data:
+        stats = [_late_entry_to_stat(e) for e in entries]
+        day_total_minutes = sum(s.minutes_late for s in stats)
+        day_avg_minutes = (day_total_minutes / len(stats)) if stats else 0.0
+        grand_total_minutes += day_total_minutes
+        grand_total_count += len(stats)
+        per_day.append(
+            LateDailyStat(
+                date=day,
+                count=len(stats),
+                users=stats,
+                user_ids=[s.user.id for s in stats],
+                total_minutes_late=day_total_minutes,
+                average_minutes_late=round(day_avg_minutes, 2),
+            )
+        )
+    return LateRangeStatResponse(
+        start=start,
+        end=end,
+        total=grand_total_count,
+        total_minutes_late=grand_total_minutes,
+        per_day=per_day,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -233,16 +295,29 @@ async def stats_presence_today(
     return _build_today_response(day, users)
 
 
-@router.get("/stats/late/today", response_model=TodayStatResponse)
+@router.get("/stats/late/today", response_model=LateTodayStatResponse)
 async def stats_late_today(
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(require_permission("presence", "view_stats")),
-    expand: Optional[str] = Query(None),
+    expand: Optional[str] = Query(
+        None,
+        description=(
+            "Relations à inclure sur les utilisateurs retournés. "
+            "Exemples: employe, employe.poste, user_groups"
+        ),
+    ),
 ):
-    day, users = await PresenceService.late_today(
+    """Liste les retards du jour avec les minutes de retard par utilisateur.
+
+    Chaque entrée contient l'utilisateur complet (``user``), l'heure de
+    scan, l'heure de début planifiée (``scheduled_start``) et le delta
+    ``minutes_late`` calculé à partir du ``WorkSchedule`` effectif de
+    l'utilisateur (override personnel, sinon défaut global).
+    """
+    day, entries = await PresenceService.late_today(
         db, _today(), expand_fields=_parse_user_expand(expand)
     )
-    return _build_today_response(day, users)
+    return _build_late_today_response(day, entries)
 
 
 @router.get("/stats/absence/today", response_model=TodayStatResponse)
@@ -277,7 +352,7 @@ async def stats_presence_range(
     return _build_range_response(start, end, data)
 
 
-@router.get("/stats/late/range", response_model=RangeStatResponse)
+@router.get("/stats/late/range", response_model=LateRangeStatResponse)
 async def stats_late_range(
     start: _date = Query(..., description="Date de début (YYYY-MM-DD)"),
     end: _date = Query(..., description="Date de fin (YYYY-MM-DD)"),
@@ -285,11 +360,18 @@ async def stats_late_range(
     _user: User = Depends(require_permission("presence", "view_stats")),
     expand: Optional[str] = Query(None),
 ):
+    """Liste jour par jour les retards avec les minutes de retard par utilisateur.
+
+    Chaque ``per_day[*].users[*]`` expose ``minutes_late``,
+    ``scheduled_start`` et ``heure_scan``. ``total_minutes_late`` et
+    ``average_minutes_late`` sont fournis par jour et pour l'ensemble de la
+    période.
+    """
     _validate_range(start, end)
     data = await PresenceService.late_range(
         db, start, end, expand_fields=_parse_user_expand(expand)
     )
-    return _build_range_response(start, end, data)
+    return _build_late_range_response(start, end, data)
 
 
 @router.get("/stats/absence/range", response_model=RangeStatResponse)
