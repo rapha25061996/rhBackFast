@@ -45,6 +45,8 @@ MODEL_RESOURCE_MAPPING = {
     "ActionEtapeProcessus": "conge_action",
     "Presence": "presence",
     "WorkSchedule": "work_schedule",
+    "AbsenceDeclaration": "absence_declaration",
+    "LateDeclaration": "late_declaration",
 }
 
 # Actions to create for each model
@@ -73,6 +75,8 @@ CONTENT_TYPE_MAPPING = {
     "conge_action": 19,
     "presence": 20,
     "work_schedule": 21,
+    "absence_declaration": 22,
+    "late_declaration": 23,
 }
 
 
@@ -235,6 +239,26 @@ async def create_permissions_for_models():
                 "resource": "conge",
                 "action": "EXPORT",
                 "description": "Permission to export leave data"
+            },
+            {
+                "codename": "absence_declaration.review",
+                "name": "Review Absence Declarations",
+                "content_type": 22,
+                "resource": "absence_declaration",
+                "action": "REVIEW",
+                "description": (
+                    "Permission to approve, reject or cancel absence declarations"
+                ),
+            },
+            {
+                "codename": "late_declaration.review",
+                "name": "Review Late Declarations",
+                "content_type": 23,
+                "resource": "late_declaration",
+                "action": "REVIEW",
+                "description": (
+                    "Permission to approve, reject or cancel late declarations"
+                ),
             },
             {
                 "codename": "presence.view_stats",
