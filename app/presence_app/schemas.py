@@ -444,3 +444,28 @@ class GlobalStatsResponse(BaseModel):
     filter_user_id: Optional[int] = None
     totals: GlobalStatTotals
     per_user: list[GlobalUserStat]
+
+
+class GlobalUserDayStat(GlobalStatTotals):
+    """Per-user counters for a single day inside the detailed stats."""
+
+    user: UserSummary
+
+
+class GlobalDayStat(GlobalStatTotals):
+    """Totals + per-user breakdown for a single day."""
+
+    date: date
+    per_user: list[GlobalUserDayStat] = []
+
+
+class GlobalStatsDetailResponse(BaseModel):
+    """Day-by-day detail for :class:`GlobalStatsResponse`."""
+
+    period: str
+    start: date
+    end: date
+    filter_user_id: Optional[int] = None
+    include_users: bool = True
+    totals: GlobalStatTotals
+    per_day: list[GlobalDayStat]

@@ -952,50 +952,48 @@ class GlobalStatsService:
         return sorted(int(r) for r in rows)
 
     @classmethod
-    async def compute(
+    async def _load_raw(
         cls,
         db: AsyncSession,
         *,
         start: _date,
         end: _date,
         user_id: Optional[int] = None,
-        expand_fields: Optional[list[str]] = None,
-    ) -> tuple[list[int], dict[int, dict[str, int]], dict[int, "User"]]:
-        """Return ``(ordered_user_ids, stats_by_user, users_by_id)``."""
+    ) -> tuple[
+        list[int],
+        dict[int, set[_date]],
+        dict[int, dict[_date, int]],
+        dict[int, set[_date]],
+        dict[int, set[_date]],
+        list[_date],
+    ]:
+        """Load all raw data needed for both compute() and compute_detailed().
+
+        Returns:
+            ``(ordered_user_ids, presence_days, late_minutes_by_day,
+               justified_days, declared_late_days, all_days)``.
+
+            ``late_minutes_by_day[uid][date]`` holds the aggregated minutes
+            late for that user/day (sum across multiple ENTRY scans, though
+            in practice there is at most one).
+        """
+        from datetime import timedelta
+
         ordered_user_ids = await cls._active_user_ids(db, user_id=user_id)
         if not ordered_user_ids:
-            return [], {}, {}
-
-        # Base counters
-        stats: dict[int, dict[str, int]] = {
-            uid: {
-                "presence_count": 0,
-                "absence_total_count": 0,
-                "absence_justified_count": 0,
-                "absence_unjustified_count": 0,
-                "late_total_count": 0,
-                "late_declared_count": 0,
-                "late_undeclared_count": 0,
-                "total_minutes_late": 0,
-            }
-            for uid in ordered_user_ids
-        }
+            return [], {}, {}, {}, {}, []
         user_id_set = set(ordered_user_ids)
 
-        # Presence + late scans (ENTRY only) for the range
-        scan_stmt = (
-            select(
-                Presence.user_id,
-                Presence.date_scan,
-                Presence.heure_scan,
-                Presence.is_late,
-            )
-            .where(
-                and_(
-                    Presence.date_scan >= start,
-                    Presence.date_scan <= end,
-                    Presence.scan_type == ScanType.ENTRY.value,
-                )
+        scan_stmt = select(
+            Presence.user_id,
+            Presence.date_scan,
+            Presence.heure_scan,
+            Presence.is_late,
+        ).where(
+            and_(
+                Presence.date_scan >= start,
+                Presence.date_scan <= end,
+                Presence.scan_type == ScanType.ENTRY.value,
             )
         )
         if user_id is not None:
@@ -1004,11 +1002,11 @@ class GlobalStatsService:
 
         per_user_starts, default_start = await WorkScheduleService.get_start_time_map(db)
 
-        # presence_days[user_id] = set of dates with at least one ENTRY scan
-        presence_days: dict[int, set[_date]] = {uid: set() for uid in ordered_user_ids}
-        # late_scans[user_id] = list[(date, minutes_late)]
-        late_scans: dict[int, list[tuple[_date, int]]] = {
-            uid: [] for uid in ordered_user_ids
+        presence_days: dict[int, set[_date]] = {
+            uid: set() for uid in ordered_user_ids
+        }
+        late_minutes_by_day: dict[int, dict[_date, int]] = {
+            uid: {} for uid in ordered_user_ids
         }
         for row in scan_rows:
             uid = int(row.user_id)
@@ -1017,12 +1015,11 @@ class GlobalStatsService:
             presence_days[uid].add(row.date_scan)
             if bool(row.is_late):
                 scheduled_start = per_user_starts.get(uid, default_start)
-                late_scans[uid].append(
-                    (row.date_scan, _minutes_between(scheduled_start, row.heure_scan))
+                minutes = _minutes_between(scheduled_start, row.heure_scan)
+                late_minutes_by_day[uid][row.date_scan] = (
+                    late_minutes_by_day[uid].get(row.date_scan, 0) + minutes
                 )
 
-        # Absence declarations overlapping the range. ``date_fin`` is
-        # optional — when NULL the declaration only covers ``date_debut``.
         abs_stmt = select(AbsenceDeclaration).where(
             and_(
                 AbsenceDeclaration.date_debut <= end,
@@ -1043,16 +1040,15 @@ class GlobalStatsService:
             uid = int(decl.user_id)
             if uid not in user_id_set:
                 continue
-            from datetime import timedelta
-
-            effective_end = decl.date_fin if decl.date_fin is not None else decl.date_debut
+            effective_end = (
+                decl.date_fin if decl.date_fin is not None else decl.date_debut
+            )
             d = max(decl.date_debut, start)
             last = min(effective_end, end)
             while d <= last:
                 justified_days[uid].add(d)
                 d += timedelta(days=1)
 
-        # Late declarations whose date falls in the range
         late_decl_stmt = select(
             LateDeclaration.user_id, LateDeclaration.date_retard
         ).where(
@@ -1076,33 +1072,90 @@ class GlobalStatsService:
                 continue
             declared_late_days[uid].add(row.date_retard)
 
-        # Build per-day sets for the range (for absence calculation)
-        from datetime import timedelta
-
         all_days: list[_date] = []
         cursor = start
         while cursor <= end:
             all_days.append(cursor)
             cursor += timedelta(days=1)
-        total_days = len(all_days)
 
-        # Aggregate
+        return (
+            ordered_user_ids,
+            presence_days,
+            late_minutes_by_day,
+            justified_days,
+            declared_late_days,
+            all_days,
+        )
+
+    @staticmethod
+    def _empty_counters() -> dict[str, int]:
+        return {
+            "presence_count": 0,
+            "absence_total_count": 0,
+            "absence_justified_count": 0,
+            "absence_unjustified_count": 0,
+            "late_total_count": 0,
+            "late_declared_count": 0,
+            "late_undeclared_count": 0,
+            "total_minutes_late": 0,
+        }
+
+    @staticmethod
+    async def _load_users(
+        db: AsyncSession,
+        user_ids: list[int],
+        *,
+        expand_fields: Optional[list[str]] = None,
+    ) -> dict[int, "User"]:
+        if not user_ids:
+            return {}
+        users_stmt = select(User).where(User.id.in_(user_ids))
+        if expand_fields:
+            users_stmt = apply_expansion(users_stmt, User, expand_fields)
+        users = list((await db.execute(users_stmt)).scalars().all())
+        return {u.id: u for u in users}
+
+    @classmethod
+    async def compute(
+        cls,
+        db: AsyncSession,
+        *,
+        start: _date,
+        end: _date,
+        user_id: Optional[int] = None,
+        expand_fields: Optional[list[str]] = None,
+    ) -> tuple[list[int], dict[int, dict[str, int]], dict[int, "User"]]:
+        """Return ``(ordered_user_ids, stats_by_user, users_by_id)``."""
+        (
+            ordered_user_ids,
+            presence_days,
+            late_minutes_by_day,
+            justified_days,
+            declared_late_days,
+            all_days,
+        ) = await cls._load_raw(db, start=start, end=end, user_id=user_id)
+        if not ordered_user_ids:
+            return [], {}, {}
+
+        total_days = len(all_days)
+        all_days_set = set(all_days)
+        stats: dict[int, dict[str, int]] = {
+            uid: cls._empty_counters() for uid in ordered_user_ids
+        }
         for uid in ordered_user_ids:
             present = presence_days[uid]
             justified = justified_days[uid]
             declared_late = declared_late_days[uid]
-            late_list = late_scans[uid]
+            minutes_by_day = late_minutes_by_day[uid]
 
             absences = total_days - len(present)
-            # Justified days that are also absent (no scan that day)
-            absent_days_set = set(all_days) - present
+            absent_days_set = all_days_set - present
             justified_absent = len(justified & absent_days_set)
-
-            late_total = len(late_list)
+            late_total = len(minutes_by_day)
             declared_late_matches = sum(
-                1 for d, _m in late_list if d in declared_late
+                1 for d in minutes_by_day if d in declared_late
             )
-            total_minutes = sum(m for _d, m in late_list)
+            total_minutes = sum(minutes_by_day.values())
 
             stats[uid]["presence_count"] = len(present)
             stats[uid]["absence_total_count"] = absences
@@ -1113,10 +1166,101 @@ class GlobalStatsService:
             stats[uid]["late_undeclared_count"] = late_total - declared_late_matches
             stats[uid]["total_minutes_late"] = total_minutes
 
-        # Load user objects
-        users_stmt = select(User).where(User.id.in_(ordered_user_ids))
-        if expand_fields:
-            users_stmt = apply_expansion(users_stmt, User, expand_fields)
-        users = list((await db.execute(users_stmt)).scalars().all())
-        users_by_id = {u.id: u for u in users}
+        users_by_id = await cls._load_users(
+            db, ordered_user_ids, expand_fields=expand_fields
+        )
         return ordered_user_ids, stats, users_by_id
+
+    @classmethod
+    async def compute_detailed(
+        cls,
+        db: AsyncSession,
+        *,
+        start: _date,
+        end: _date,
+        user_id: Optional[int] = None,
+        include_users: bool = True,
+        expand_fields: Optional[list[str]] = None,
+    ) -> tuple[
+        list[_date],
+        dict[_date, dict[str, int]],
+        dict[_date, dict[int, dict[str, int]]],
+        list[int],
+        dict[int, "User"],
+    ]:
+        """Day-by-day breakdown of the same counters exposed by :meth:`compute`.
+
+        Returns ``(all_days, totals_by_day, per_user_by_day,
+        users_in_response, users_by_id)``.
+
+        ``per_user_by_day[date]`` only contains entries for users with at
+        least one non-zero counter that day (keeps the yearly payload
+        manageable). ``users_in_response`` is the ordered set of users
+        actually referenced across all days.
+        """
+        (
+            ordered_user_ids,
+            presence_days,
+            late_minutes_by_day,
+            justified_days,
+            declared_late_days,
+            all_days,
+        ) = await cls._load_raw(db, start=start, end=end, user_id=user_id)
+
+        totals_by_day: dict[_date, dict[str, int]] = {
+            d: cls._empty_counters() for d in all_days
+        }
+        per_user_by_day: dict[_date, dict[int, dict[str, int]]] = {
+            d: {} for d in all_days
+        }
+        referenced_users: set[int] = set()
+
+        for uid in ordered_user_ids:
+            present = presence_days[uid]
+            justified = justified_days[uid]
+            declared_late = declared_late_days[uid]
+            minutes_by_day = late_minutes_by_day[uid]
+
+            for d in all_days:
+                is_present = d in present
+                is_absent = not is_present
+                is_justified = is_absent and d in justified
+                minutes = minutes_by_day.get(d, 0)
+                is_late_scan = d in minutes_by_day
+                is_declared_late = is_late_scan and d in declared_late
+
+                day_counters = {
+                    "presence_count": 1 if is_present else 0,
+                    "absence_total_count": 1 if is_absent else 0,
+                    "absence_justified_count": 1 if is_justified else 0,
+                    "absence_unjustified_count": 1
+                    if (is_absent and not is_justified)
+                    else 0,
+                    "late_total_count": 1 if is_late_scan else 0,
+                    "late_declared_count": 1 if is_declared_late else 0,
+                    "late_undeclared_count": 1
+                    if (is_late_scan and not is_declared_late)
+                    else 0,
+                    "total_minutes_late": minutes,
+                }
+
+                totals = totals_by_day[d]
+                for key, val in day_counters.items():
+                    totals[key] += val
+
+                if include_users and any(v > 0 for v in day_counters.values()):
+                    per_user_by_day[d][uid] = day_counters
+                    referenced_users.add(uid)
+
+        if include_users:
+            users_in_response = [
+                uid for uid in ordered_user_ids if uid in referenced_users
+            ]
+            users_by_id = await cls._load_users(
+                db, users_in_response, expand_fields=expand_fields
+            )
+        else:
+            users_in_response = []
+            users_by_id = {}
+
+        return all_days, totals_by_day, per_user_by_day, users_in_response, users_by_id
