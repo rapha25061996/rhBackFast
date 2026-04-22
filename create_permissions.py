@@ -47,6 +47,8 @@ MODEL_RESOURCE_MAPPING = {
     "WorkSchedule": "work_schedule",
     "AbsenceDeclaration": "absence_declaration",
     "LateDeclaration": "late_declaration",
+    "PrAbsenceType": "absence_type",
+    "PrLateReasonType": "late_reason_type",
 }
 
 # Actions to create for each model
@@ -77,6 +79,8 @@ CONTENT_TYPE_MAPPING = {
     "work_schedule": 21,
     "absence_declaration": 22,
     "late_declaration": 23,
+    "absence_type": 24,
+    "late_reason_type": 25,
 }
 
 
@@ -239,26 +243,6 @@ async def create_permissions_for_models():
                 "resource": "conge",
                 "action": "EXPORT",
                 "description": "Permission to export leave data"
-            },
-            {
-                "codename": "absence_declaration.review",
-                "name": "Review Absence Declarations",
-                "content_type": 22,
-                "resource": "absence_declaration",
-                "action": "REVIEW",
-                "description": (
-                    "Permission to approve, reject or cancel absence declarations"
-                ),
-            },
-            {
-                "codename": "late_declaration.review",
-                "name": "Review Late Declarations",
-                "content_type": 23,
-                "resource": "late_declaration",
-                "action": "REVIEW",
-                "description": (
-                    "Permission to approve, reject or cancel late declarations"
-                ),
             },
             {
                 "codename": "presence.view_stats",

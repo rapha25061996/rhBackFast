@@ -355,6 +355,31 @@ async def init_paie_workflow_defaults_task():
         await engine.dispose()
 
 
+async def init_presence_lookup_defaults():
+    """Seed absence-type and late-reason-type lookup tables."""
+    if not getattr(settings, "PRESENCE_INIT_DEFAULTS", True):
+        print("⏭️  Presence lookup defaults init disabled")
+        return
+
+    print("\n🕒 Initializing PRESENCE lookup defaults...")
+
+    from app.presence_app.init_data import seed_presence_lookups
+
+    engine = create_async_engine(settings.DATABASE_URL, echo=False)
+    async_session = async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    try:
+        async with async_session() as session:
+            await seed_presence_lookups(session)
+        print("✓ PRESENCE lookup defaults initialization complete\n")
+    except Exception as e:
+        print(f"❌ Error initializing PRESENCE lookups: {e}\n")
+    finally:
+        await engine.dispose()
+
+
 async def run_startup_tasks():
     """
     Run all startup tasks.
@@ -363,6 +388,7 @@ async def run_startup_tasks():
     await create_default_permissions()
     await init_conge_workflow_defaults()
     await init_paie_workflow_defaults_task()
+    await init_presence_lookup_defaults()
     # Add other startup tasks here in the future
 
 

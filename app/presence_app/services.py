@@ -19,9 +19,6 @@ from app.core.query_utils import apply_expansion
 from app.presence_app.constants import (
     DEFAULT_END_TIME,
     DEFAULT_START_TIME,
-    AbsenceType,
-    DeclarationStatus,
-    LateReasonType,
     ScanMethod,
     ScanType,
 )
@@ -29,6 +26,8 @@ from app.presence_app.models import (
     AbsenceDeclaration,
     LateDeclaration,
     Presence,
+    PrAbsenceType,
+    PrLateReasonType,
     WorkSchedule,
 )
 from app.user_app.models import User
@@ -478,31 +477,207 @@ class PresenceService:
         }
         return await cls._resolve_range(db, per_day, start, end, expand_fields=expand_fields)
 
+class PrAbsenceTypeService:
+    """CRUD helpers for :class:`PrAbsenceType`."""
+
+    @staticmethod
+    async def create(
+        db: AsyncSession,
+        *,
+        code: str,
+        label: str,
+        description: Optional[str] = None,
+        is_active: bool = True,
+    ) -> PrAbsenceType:
+        row = PrAbsenceType(
+            code=code,
+            label=label,
+            description=description,
+            is_active=is_active,
+        )
+        db.add(row)
+        await db.flush()
+        await db.refresh(row)
+        return row
+
+    @staticmethod
+    async def get(db: AsyncSession, type_id: int) -> PrAbsenceType:
+        row = await db.get(PrAbsenceType, type_id)
+        if row is None:
+            raise DeclarationNotFoundError(
+                f"PrAbsenceType {type_id} introuvable"
+            )
+        return row
+
+    @staticmethod
+    async def get_by_code(db: AsyncSession, code: str) -> Optional[PrAbsenceType]:
+        stmt = select(PrAbsenceType).where(PrAbsenceType.code == code)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list(
+        db: AsyncSession,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        is_active: Optional[bool] = None,
+    ) -> tuple[list[PrAbsenceType], int]:
+        base = select(PrAbsenceType)
+        count_stmt = select(func.count()).select_from(PrAbsenceType)
+        if is_active is not None:
+            base = base.where(PrAbsenceType.is_active.is_(is_active))
+            count_stmt = count_stmt.where(PrAbsenceType.is_active.is_(is_active))
+        total = (await db.execute(count_stmt)).scalar() or 0
+        stmt = base.order_by(PrAbsenceType.code.asc()).offset(skip).limit(limit)
+        items = list((await db.execute(stmt)).scalars().all())
+        return items, total
+
+    @staticmethod
+    async def update(
+        db: AsyncSession,
+        type_id: int,
+        *,
+        code: Optional[str] = None,
+        label: Optional[str] = None,
+        description: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> PrAbsenceType:
+        row = await PrAbsenceTypeService.get(db, type_id)
+        if code is not None:
+            row.code = code
+        if label is not None:
+            row.label = label
+        if description is not None:
+            row.description = description
+        if is_active is not None:
+            row.is_active = is_active
+        await db.flush()
+        await db.refresh(row)
+        return row
+
+    @staticmethod
+    async def delete(db: AsyncSession, type_id: int) -> None:
+        row = await PrAbsenceTypeService.get(db, type_id)
+        await db.delete(row)
+        await db.flush()
+
+
+class PrLateReasonTypeService:
+    """CRUD helpers for :class:`PrLateReasonType`."""
+
+    @staticmethod
+    async def create(
+        db: AsyncSession,
+        *,
+        code: str,
+        label: str,
+        description: Optional[str] = None,
+        is_active: bool = True,
+    ) -> PrLateReasonType:
+        row = PrLateReasonType(
+            code=code,
+            label=label,
+            description=description,
+            is_active=is_active,
+        )
+        db.add(row)
+        await db.flush()
+        await db.refresh(row)
+        return row
+
+    @staticmethod
+    async def get(db: AsyncSession, type_id: int) -> PrLateReasonType:
+        row = await db.get(PrLateReasonType, type_id)
+        if row is None:
+            raise DeclarationNotFoundError(
+                f"PrLateReasonType {type_id} introuvable"
+            )
+        return row
+
+    @staticmethod
+    async def get_by_code(db: AsyncSession, code: str) -> Optional[PrLateReasonType]:
+        stmt = select(PrLateReasonType).where(PrLateReasonType.code == code)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list(
+        db: AsyncSession,
+        *,
+        skip: int = 0,
+        limit: int = 100,
+        is_active: Optional[bool] = None,
+    ) -> tuple[list[PrLateReasonType], int]:
+        base = select(PrLateReasonType)
+        count_stmt = select(func.count()).select_from(PrLateReasonType)
+        if is_active is not None:
+            base = base.where(PrLateReasonType.is_active.is_(is_active))
+            count_stmt = count_stmt.where(PrLateReasonType.is_active.is_(is_active))
+        total = (await db.execute(count_stmt)).scalar() or 0
+        stmt = base.order_by(PrLateReasonType.code.asc()).offset(skip).limit(limit)
+        items = list((await db.execute(stmt)).scalars().all())
+        return items, total
+
+    @staticmethod
+    async def update(
+        db: AsyncSession,
+        type_id: int,
+        *,
+        code: Optional[str] = None,
+        label: Optional[str] = None,
+        description: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> PrLateReasonType:
+        row = await PrLateReasonTypeService.get(db, type_id)
+        if code is not None:
+            row.code = code
+        if label is not None:
+            row.label = label
+        if description is not None:
+            row.description = description
+        if is_active is not None:
+            row.is_active = is_active
+        await db.flush()
+        await db.refresh(row)
+        return row
+
+    @staticmethod
+    async def delete(db: AsyncSession, type_id: int) -> None:
+        row = await PrLateReasonTypeService.get(db, type_id)
+        await db.delete(row)
+        await db.flush()
+
+
 class AbsenceDeclarationService:
-    """CRUD and review helpers for :class:`AbsenceDeclaration`."""
+    """CRUD helpers for :class:`AbsenceDeclaration`."""
 
     @staticmethod
     async def create(
         db: AsyncSession,
         *,
         user_id: int,
+        absence_type_id: int,
         date_debut: _date,
-        date_fin: _date,
-        absence_type: AbsenceType,
+        date_fin: Optional[_date] = None,
         reason: Optional[str] = None,
         justificatif_url: Optional[str] = None,
     ) -> AbsenceDeclaration:
         user = await db.get(User, user_id)
         if user is None:
             raise UserNotFoundError(f"User {user_id} introuvable")
+        type_row = await db.get(PrAbsenceType, absence_type_id)
+        if type_row is None:
+            raise DeclarationNotFoundError(
+                f"PrAbsenceType {absence_type_id} introuvable"
+            )
+        if date_fin is not None and date_fin < date_debut:
+            raise DeclarationStateError("date_fin doit être >= date_debut")
         decl = AbsenceDeclaration(
             user_id=user_id,
+            absence_type_id=absence_type_id,
             date_debut=date_debut,
             date_fin=date_fin,
-            absence_type=absence_type.value,
             reason=reason,
             justificatif_url=justificatif_url,
-            status=DeclarationStatus.PENDING.value,
         )
         db.add(decl)
         await db.flush()
@@ -533,8 +708,7 @@ class AbsenceDeclarationService:
         skip: int = 0,
         limit: int = 100,
         user_id: Optional[int] = None,
-        status: Optional[DeclarationStatus] = None,
-        absence_type: Optional[AbsenceType] = None,
+        absence_type_id: Optional[int] = None,
         start: Optional[_date] = None,
         end: Optional[_date] = None,
         expand_fields: Optional[list[str]] = None,
@@ -544,12 +718,14 @@ class AbsenceDeclarationService:
         clauses = []
         if user_id is not None:
             clauses.append(AbsenceDeclaration.user_id == user_id)
-        if status is not None:
-            clauses.append(AbsenceDeclaration.status == status.value)
-        if absence_type is not None:
-            clauses.append(AbsenceDeclaration.absence_type == absence_type.value)
+        if absence_type_id is not None:
+            clauses.append(AbsenceDeclaration.absence_type_id == absence_type_id)
         if start is not None:
-            clauses.append(AbsenceDeclaration.date_fin >= start)
+            # Declaration covers [date_debut, COALESCE(date_fin, date_debut)]
+            clauses.append(
+                func.coalesce(AbsenceDeclaration.date_fin, AbsenceDeclaration.date_debut)
+                >= start
+            )
         if end is not None:
             clauses.append(AbsenceDeclaration.date_debut <= end)
         if clauses:
@@ -576,55 +752,34 @@ class AbsenceDeclarationService:
         *,
         date_debut: Optional[_date] = None,
         date_fin: Optional[_date] = None,
-        absence_type: Optional[AbsenceType] = None,
+        absence_type_id: Optional[int] = None,
         reason: Optional[str] = None,
         justificatif_url: Optional[str] = None,
+        clear_date_fin: bool = False,
+        clear_justificatif: bool = False,
     ) -> AbsenceDeclaration:
         decl = await AbsenceDeclarationService.get(db, declaration_id)
-        if decl.status != DeclarationStatus.PENDING.value:
-            raise DeclarationStateError(
-                "Seule une déclaration PENDING peut être modifiée"
-            )
-        new_start = date_debut if date_debut is not None else decl.date_debut
-        new_end = date_fin if date_fin is not None else decl.date_fin
-        if new_end < new_start:
-            raise DeclarationStateError(
-                "date_fin doit être >= date_debut"
-            )
-        decl.date_debut = new_start
-        decl.date_fin = new_end
-        if absence_type is not None:
-            decl.absence_type = absence_type.value
+        if date_debut is not None:
+            decl.date_debut = date_debut
+        if clear_date_fin:
+            decl.date_fin = None
+        elif date_fin is not None:
+            decl.date_fin = date_fin
+        if decl.date_fin is not None and decl.date_fin < decl.date_debut:
+            raise DeclarationStateError("date_fin doit être >= date_debut")
+        if absence_type_id is not None:
+            type_row = await db.get(PrAbsenceType, absence_type_id)
+            if type_row is None:
+                raise DeclarationNotFoundError(
+                    f"PrAbsenceType {absence_type_id} introuvable"
+                )
+            decl.absence_type_id = absence_type_id
         if reason is not None:
             decl.reason = reason
-        if justificatif_url is not None:
+        if clear_justificatif:
+            decl.justificatif_url = None
+        elif justificatif_url is not None:
             decl.justificatif_url = justificatif_url
-        await db.flush()
-        await db.refresh(decl)
-        return decl
-
-    @staticmethod
-    async def review(
-        db: AsyncSession,
-        declaration_id: int,
-        *,
-        decision: DeclarationStatus,
-        reviewer_id: int,
-        review_comment: Optional[str] = None,
-    ) -> AbsenceDeclaration:
-        if decision not in (
-            DeclarationStatus.APPROVED,
-            DeclarationStatus.REJECTED,
-            DeclarationStatus.CANCELLED,
-        ):
-            raise DeclarationStateError(
-                "decision doit être APPROVED, REJECTED ou CANCELLED"
-            )
-        decl = await AbsenceDeclarationService.get(db, declaration_id)
-        decl.status = decision.value
-        decl.reviewed_by_id = reviewer_id
-        decl.reviewed_at = datetime.utcnow()
-        decl.review_comment = review_comment
         await db.flush()
         await db.refresh(decl)
         return decl
@@ -637,28 +792,32 @@ class AbsenceDeclarationService:
 
 
 class LateDeclarationService:
-    """CRUD and review helpers for :class:`LateDeclaration`."""
+    """CRUD helpers for :class:`LateDeclaration`."""
 
     @staticmethod
     async def create(
         db: AsyncSession,
         *,
         user_id: int,
+        reason_type_id: int,
         date_retard: _date,
-        reason_type: LateReasonType,
         expected_arrival_time: Optional[_time] = None,
         reason: Optional[str] = None,
     ) -> LateDeclaration:
         user = await db.get(User, user_id)
         if user is None:
             raise UserNotFoundError(f"User {user_id} introuvable")
+        type_row = await db.get(PrLateReasonType, reason_type_id)
+        if type_row is None:
+            raise DeclarationNotFoundError(
+                f"PrLateReasonType {reason_type_id} introuvable"
+            )
         decl = LateDeclaration(
             user_id=user_id,
+            reason_type_id=reason_type_id,
             date_retard=date_retard,
             expected_arrival_time=expected_arrival_time,
-            reason_type=reason_type.value,
             reason=reason,
-            status=DeclarationStatus.PENDING.value,
         )
         db.add(decl)
         await db.flush()
@@ -689,8 +848,7 @@ class LateDeclarationService:
         skip: int = 0,
         limit: int = 100,
         user_id: Optional[int] = None,
-        status: Optional[DeclarationStatus] = None,
-        reason_type: Optional[LateReasonType] = None,
+        reason_type_id: Optional[int] = None,
         start: Optional[_date] = None,
         end: Optional[_date] = None,
         expand_fields: Optional[list[str]] = None,
@@ -700,10 +858,8 @@ class LateDeclarationService:
         clauses = []
         if user_id is not None:
             clauses.append(LateDeclaration.user_id == user_id)
-        if status is not None:
-            clauses.append(LateDeclaration.status == status.value)
-        if reason_type is not None:
-            clauses.append(LateDeclaration.reason_type == reason_type.value)
+        if reason_type_id is not None:
+            clauses.append(LateDeclaration.reason_type_id == reason_type_id)
         if start is not None:
             clauses.append(LateDeclaration.date_retard >= start)
         if end is not None:
@@ -732,48 +888,23 @@ class LateDeclarationService:
         *,
         date_retard: Optional[_date] = None,
         expected_arrival_time: Optional[_time] = None,
-        reason_type: Optional[LateReasonType] = None,
+        reason_type_id: Optional[int] = None,
         reason: Optional[str] = None,
     ) -> LateDeclaration:
         decl = await LateDeclarationService.get(db, declaration_id)
-        if decl.status != DeclarationStatus.PENDING.value:
-            raise DeclarationStateError(
-                "Seule une déclaration PENDING peut être modifiée"
-            )
         if date_retard is not None:
             decl.date_retard = date_retard
         if expected_arrival_time is not None:
             decl.expected_arrival_time = expected_arrival_time
-        if reason_type is not None:
-            decl.reason_type = reason_type.value
+        if reason_type_id is not None:
+            type_row = await db.get(PrLateReasonType, reason_type_id)
+            if type_row is None:
+                raise DeclarationNotFoundError(
+                    f"PrLateReasonType {reason_type_id} introuvable"
+                )
+            decl.reason_type_id = reason_type_id
         if reason is not None:
             decl.reason = reason
-        await db.flush()
-        await db.refresh(decl)
-        return decl
-
-    @staticmethod
-    async def review(
-        db: AsyncSession,
-        declaration_id: int,
-        *,
-        decision: DeclarationStatus,
-        reviewer_id: int,
-        review_comment: Optional[str] = None,
-    ) -> LateDeclaration:
-        if decision not in (
-            DeclarationStatus.APPROVED,
-            DeclarationStatus.REJECTED,
-            DeclarationStatus.CANCELLED,
-        ):
-            raise DeclarationStateError(
-                "decision doit être APPROVED, REJECTED ou CANCELLED"
-            )
-        decl = await LateDeclarationService.get(db, declaration_id)
-        decl.status = decision.value
-        decl.reviewed_by_id = reviewer_id
-        decl.reviewed_at = datetime.utcnow()
-        decl.review_comment = review_comment
         await db.flush()
         await db.refresh(decl)
         return decl
@@ -793,17 +924,21 @@ class LateDeclarationService:
 class GlobalStatsService:
     """Aggregate per-user statistics for a date range.
 
-    Combines raw presence/late scans with approved absence and late
+    Combines raw presence/late scans with user-filed absence and late
     declarations to compute:
 
       - presence_count             — days with at least one ENTRY scan
       - absence_total_count        — days without any scan in the range
-      - absence_justified_count    — subset covered by an APPROVED absence decl
+      - absence_justified_count    — subset covered by an absence declaration
       - absence_unjustified_count  — absence_total_count - absence_justified
       - late_total_count           — late ENTRY scans in the range
-      - late_declared_count        — late scans matched by an APPROVED late decl
+      - late_declared_count        — late scans matched by a late declaration
       - late_undeclared_count      — late_total_count - late_declared_count
       - total_minutes_late         — sum of minute deltas for late scans
+
+    Declarations have no approval workflow: any stored declaration
+    contributes to the justified / declared counters as long as the
+    corresponding day falls in the requested range.
     """
 
     @staticmethod
@@ -886,12 +1021,15 @@ class GlobalStatsService:
                     (row.date_scan, _minutes_between(scheduled_start, row.heure_scan))
                 )
 
-        # Approved absence declarations overlapping the range
+        # Absence declarations overlapping the range. ``date_fin`` is
+        # optional — when NULL the declaration only covers ``date_debut``.
         abs_stmt = select(AbsenceDeclaration).where(
             and_(
-                AbsenceDeclaration.status == DeclarationStatus.APPROVED.value,
                 AbsenceDeclaration.date_debut <= end,
-                AbsenceDeclaration.date_fin >= start,
+                func.coalesce(
+                    AbsenceDeclaration.date_fin, AbsenceDeclaration.date_debut
+                )
+                >= start,
             )
         )
         if user_id is not None:
@@ -907,18 +1045,18 @@ class GlobalStatsService:
                 continue
             from datetime import timedelta
 
+            effective_end = decl.date_fin if decl.date_fin is not None else decl.date_debut
             d = max(decl.date_debut, start)
-            last = min(decl.date_fin, end)
+            last = min(effective_end, end)
             while d <= last:
                 justified_days[uid].add(d)
                 d += timedelta(days=1)
 
-        # Approved late declarations in the range
+        # Late declarations whose date falls in the range
         late_decl_stmt = select(
             LateDeclaration.user_id, LateDeclaration.date_retard
         ).where(
             and_(
-                LateDeclaration.status == DeclarationStatus.APPROVED.value,
                 LateDeclaration.date_retard >= start,
                 LateDeclaration.date_retard <= end,
             )

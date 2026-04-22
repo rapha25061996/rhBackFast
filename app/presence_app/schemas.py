@@ -6,13 +6,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.presence_app.constants import (
-    AbsenceType,
-    DeclarationStatus,
-    LateReasonType,
-    ScanMethod,
-    ScanType,
-)
+from app.presence_app.constants import ScanMethod, ScanType
 
 
 # ---------------------------------------------------------------------------
@@ -238,84 +232,128 @@ class LateRangeStatResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Reference data: absence types & late reason types
+# ---------------------------------------------------------------------------
+
+
+class PrAbsenceTypeBase(BaseModel):
+    code: str = Field(..., min_length=1, max_length=32)
+    label: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    is_active: bool = True
+
+
+class PrAbsenceTypeCreate(PrAbsenceTypeBase):
+    pass
+
+
+class PrAbsenceTypeUpdate(BaseModel):
+    code: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    label: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class PrAbsenceTypeResponse(PrAbsenceTypeBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaginatedPrAbsenceType(BaseModel):
+    items: list[PrAbsenceTypeResponse]
+    total: int
+    skip: int
+    limit: int
+
+
+class PrLateReasonTypeBase(BaseModel):
+    code: str = Field(..., min_length=1, max_length=32)
+    label: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    is_active: bool = True
+
+
+class PrLateReasonTypeCreate(PrLateReasonTypeBase):
+    pass
+
+
+class PrLateReasonTypeUpdate(BaseModel):
+    code: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    label: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class PrLateReasonTypeResponse(PrLateReasonTypeBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PaginatedPrLateReasonType(BaseModel):
+    items: list[PrLateReasonTypeResponse]
+    total: int
+    skip: int
+    limit: int
+
+
+# ---------------------------------------------------------------------------
 # Absence declarations
 # ---------------------------------------------------------------------------
 
 
 class AbsenceDeclarationBase(BaseModel):
     date_debut: date
-    date_fin: date
-    absence_type: AbsenceType
+    date_fin: Optional[date] = Field(
+        default=None,
+        description=(
+            "Dernier jour de l'absence (optionnel). Si omis, la déclaration "
+            "ne couvre que ``date_debut``."
+        ),
+    )
+    absence_type_id: int = Field(..., gt=0)
     reason: Optional[str] = None
-    justificatif_url: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_dates(self) -> "AbsenceDeclarationBase":
-        if self.date_fin < self.date_debut:
+        if self.date_fin is not None and self.date_fin < self.date_debut:
             raise ValueError("date_fin must be greater than or equal to date_debut")
         return self
-
-
-class AbsenceDeclarationCreate(AbsenceDeclarationBase):
-    user_id: Optional[int] = Field(
-        default=None,
-        description=(
-            "ID de l'utilisateur concerné. Si omis, la déclaration est créée "
-            "pour l'utilisateur authentifié."
-        ),
-    )
 
 
 class AbsenceDeclarationUpdate(BaseModel):
     date_debut: Optional[date] = None
     date_fin: Optional[date] = None
-    absence_type: Optional[AbsenceType] = None
+    absence_type_id: Optional[int] = Field(default=None, gt=0)
     reason: Optional[str] = None
-    justificatif_url: Optional[str] = None
-
-    @model_validator(mode="after")
-    def _validate_dates(self) -> "AbsenceDeclarationUpdate":
-        if (
-            self.date_debut is not None
-            and self.date_fin is not None
-            and self.date_fin < self.date_debut
-        ):
-            raise ValueError("date_fin must be greater than or equal to date_debut")
-        return self
-
-
-class AbsenceDeclarationReview(BaseModel):
-    decision: DeclarationStatus = Field(
-        ..., description="Statut cible: APPROVED, REJECTED ou CANCELLED"
+    clear_date_fin: bool = Field(
+        default=False,
+        description="Si true, date_fin est explicitement effacé (même jour que date_debut).",
     )
-    review_comment: Optional[str] = None
-
-    @model_validator(mode="after")
-    def _validate_decision(self) -> "AbsenceDeclarationReview":
-        allowed = {
-            DeclarationStatus.APPROVED,
-            DeclarationStatus.REJECTED,
-            DeclarationStatus.CANCELLED,
-        }
-        if self.decision not in allowed:
-            raise ValueError(
-                "decision must be one of APPROVED, REJECTED or CANCELLED"
-            )
-        return self
+    clear_justificatif: bool = Field(
+        default=False,
+        description="Si true, le justificatif existant est supprimé.",
+    )
 
 
-class AbsenceDeclarationResponse(AbsenceDeclarationBase):
+class AbsenceDeclarationResponse(BaseModel):
     id: int
     user_id: int
-    status: DeclarationStatus
-    reviewed_by_id: Optional[int] = None
-    reviewed_at: Optional[datetime] = None
-    review_comment: Optional[str] = None
+    absence_type_id: int
+    date_debut: date
+    date_fin: Optional[date] = None
+    reason: Optional[str] = None
+    justificatif_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
     user: Optional[UserSummary] = None
-    reviewed_by: Optional[UserSummary] = None
+    absence_type: Optional[PrAbsenceTypeResponse] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -335,7 +373,7 @@ class PaginatedAbsenceDeclaration(BaseModel):
 class LateDeclarationBase(BaseModel):
     date_retard: date
     expected_arrival_time: Optional[time] = None
-    reason_type: LateReasonType
+    reason_type_id: int = Field(..., gt=0)
     reason: Optional[str] = None
 
 
@@ -352,40 +390,22 @@ class LateDeclarationCreate(LateDeclarationBase):
 class LateDeclarationUpdate(BaseModel):
     date_retard: Optional[date] = None
     expected_arrival_time: Optional[time] = None
-    reason_type: Optional[LateReasonType] = None
+    reason_type_id: Optional[int] = Field(default=None, gt=0)
     reason: Optional[str] = None
 
 
-class LateDeclarationReview(BaseModel):
-    decision: DeclarationStatus
-    review_comment: Optional[str] = None
-
-    @model_validator(mode="after")
-    def _validate_decision(self) -> "LateDeclarationReview":
-        allowed = {
-            DeclarationStatus.APPROVED,
-            DeclarationStatus.REJECTED,
-            DeclarationStatus.CANCELLED,
-        }
-        if self.decision not in allowed:
-            raise ValueError(
-                "decision must be one of APPROVED, REJECTED or CANCELLED"
-            )
-        return self
-
-
-class LateDeclarationResponse(LateDeclarationBase):
+class LateDeclarationResponse(BaseModel):
     id: int
     user_id: int
-    status: DeclarationStatus
-    reviewed_by_id: Optional[int] = None
-    reviewed_at: Optional[datetime] = None
-    review_comment: Optional[str] = None
+    reason_type_id: int
+    date_retard: date
+    expected_arrival_time: Optional[time] = None
+    reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
     user: Optional[UserSummary] = None
-    reviewed_by: Optional[UserSummary] = None
+    reason_type: Optional[PrLateReasonTypeResponse] = None
 
     model_config = ConfigDict(from_attributes=True)
 

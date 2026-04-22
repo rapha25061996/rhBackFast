@@ -5,24 +5,28 @@ from datetime import date as _date
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import os
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.permissions import require_permission
 from app.core.query_utils import apply_expansion, parse_expand_param
-from app.presence_app.constants import (
-    AbsenceType,
-    DeclarationStatus,
-    LateReasonType,
-)
+from app.core.storage_service import get_storage_service
 from app.presence_app.models import WorkSchedule
 from app.presence_app.schemas import (
-    AbsenceDeclarationCreate,
     AbsenceDeclarationResponse,
-    AbsenceDeclarationReview,
-    AbsenceDeclarationUpdate,
     DailyStat,
     GlobalStatsResponse,
     GlobalStatTotals,
@@ -30,7 +34,6 @@ from app.presence_app.schemas import (
     LateDailyStat,
     LateDeclarationCreate,
     LateDeclarationResponse,
-    LateDeclarationReview,
     LateDeclarationUpdate,
     LateRangeStatResponse,
     LateTodayStatResponse,
@@ -38,8 +41,16 @@ from app.presence_app.schemas import (
     PaginatedAbsenceDeclaration,
     PaginatedLateDeclaration,
     PaginatedPresence,
+    PaginatedPrAbsenceType,
+    PaginatedPrLateReasonType,
     PaginatedWorkSchedule,
     PresenceResponse,
+    PrAbsenceTypeCreate,
+    PrAbsenceTypeResponse,
+    PrAbsenceTypeUpdate,
+    PrLateReasonTypeCreate,
+    PrLateReasonTypeResponse,
+    PrLateReasonTypeUpdate,
     RangeStatResponse,
     ScanRequest,
     ScanResponse,
@@ -58,6 +69,8 @@ from app.presence_app.services import (
     LateEntry,
     MaxScansReachedError,
     PresenceService,
+    PrAbsenceTypeService,
+    PrLateReasonTypeService,
     UserNotFoundError,
 )
 from app.user_app.models import User
@@ -582,7 +595,216 @@ async def delete_work_schedule(
 
 
 # ---------------------------------------------------------------------------
-# Absence declarations
+# Reference data (absence types, late reason types)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/absence-types",
+    response_model=PrAbsenceTypeResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_absence_type(
+    payload: PrAbsenceTypeCreate,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("absence_type", "create")),
+):
+    if await PrAbsenceTypeService.get_by_code(db, payload.code) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Le code '{payload.code}' est déjà utilisé",
+        )
+    row = await PrAbsenceTypeService.create(
+        db,
+        code=payload.code,
+        label=payload.label,
+        description=payload.description,
+        is_active=payload.is_active,
+    )
+    return PrAbsenceTypeResponse.model_validate(row)
+
+
+@router.get("/absence-types", response_model=PaginatedPrAbsenceType)
+async def list_absence_types(
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("absence_type", "read")),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    is_active: Optional[bool] = Query(None),
+):
+    items, total = await PrAbsenceTypeService.list(
+        db, skip=skip, limit=limit, is_active=is_active
+    )
+    return PaginatedPrAbsenceType(
+        items=[PrAbsenceTypeResponse.model_validate(i) for i in items],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.get("/absence-types/{type_id}", response_model=PrAbsenceTypeResponse)
+async def get_absence_type(
+    type_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("absence_type", "read")),
+):
+    try:
+        row = await PrAbsenceTypeService.get(db, type_id)
+    except DeclarationNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    return PrAbsenceTypeResponse.model_validate(row)
+
+
+@router.patch("/absence-types/{type_id}", response_model=PrAbsenceTypeResponse)
+async def update_absence_type(
+    type_id: int,
+    payload: PrAbsenceTypeUpdate,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("absence_type", "update")),
+):
+    try:
+        if payload.code is not None:
+            existing = await PrAbsenceTypeService.get_by_code(db, payload.code)
+            if existing is not None and existing.id != type_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Le code '{payload.code}' est déjà utilisé",
+                )
+        row = await PrAbsenceTypeService.update(
+            db,
+            type_id,
+            code=payload.code,
+            label=payload.label,
+            description=payload.description,
+            is_active=payload.is_active,
+        )
+    except DeclarationNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    return PrAbsenceTypeResponse.model_validate(row)
+
+
+@router.delete(
+    "/absence-types/{type_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_absence_type(
+    type_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("absence_type", "delete")),
+):
+    try:
+        await PrAbsenceTypeService.delete(db, type_id)
+    except DeclarationNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    return None
+
+
+@router.post(
+    "/late-reason-types",
+    response_model=PrLateReasonTypeResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_late_reason_type(
+    payload: PrLateReasonTypeCreate,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("late_reason_type", "create")),
+):
+    if await PrLateReasonTypeService.get_by_code(db, payload.code) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Le code '{payload.code}' est déjà utilisé",
+        )
+    row = await PrLateReasonTypeService.create(
+        db,
+        code=payload.code,
+        label=payload.label,
+        description=payload.description,
+        is_active=payload.is_active,
+    )
+    return PrLateReasonTypeResponse.model_validate(row)
+
+
+@router.get("/late-reason-types", response_model=PaginatedPrLateReasonType)
+async def list_late_reason_types(
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("late_reason_type", "read")),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    is_active: Optional[bool] = Query(None),
+):
+    items, total = await PrLateReasonTypeService.list(
+        db, skip=skip, limit=limit, is_active=is_active
+    )
+    return PaginatedPrLateReasonType(
+        items=[PrLateReasonTypeResponse.model_validate(i) for i in items],
+        total=total,
+        skip=skip,
+        limit=limit,
+    )
+
+
+@router.get(
+    "/late-reason-types/{type_id}", response_model=PrLateReasonTypeResponse
+)
+async def get_late_reason_type(
+    type_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("late_reason_type", "read")),
+):
+    try:
+        row = await PrLateReasonTypeService.get(db, type_id)
+    except DeclarationNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    return PrLateReasonTypeResponse.model_validate(row)
+
+
+@router.patch(
+    "/late-reason-types/{type_id}", response_model=PrLateReasonTypeResponse
+)
+async def update_late_reason_type(
+    type_id: int,
+    payload: PrLateReasonTypeUpdate,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("late_reason_type", "update")),
+):
+    try:
+        if payload.code is not None:
+            existing = await PrLateReasonTypeService.get_by_code(db, payload.code)
+            if existing is not None and existing.id != type_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Le code '{payload.code}' est déjà utilisé",
+                )
+        row = await PrLateReasonTypeService.update(
+            db,
+            type_id,
+            code=payload.code,
+            label=payload.label,
+            description=payload.description,
+            is_active=payload.is_active,
+        )
+    except DeclarationNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    return PrLateReasonTypeResponse.model_validate(row)
+
+
+@router.delete(
+    "/late-reason-types/{type_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_late_reason_type(
+    type_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(require_permission("late_reason_type", "delete")),
+):
+    try:
+        await PrLateReasonTypeService.delete(db, type_id)
+    except DeclarationNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Absence declarations (file upload)
 # ---------------------------------------------------------------------------
 
 
@@ -591,38 +813,102 @@ def _can_manage_declaration(owner_id: int, user: User) -> bool:
     return bool(getattr(user, "is_superuser", False)) or user.id == owner_id
 
 
+ABSENCE_JUSTIFICATIF_EXTENSIONS = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".jpg",
+    ".jpeg",
+    ".png",
+}
+ABSENCE_JUSTIFICATIF_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+async def _save_justificatif(
+    file: UploadFile, *, previous_path: Optional[str] = None
+) -> str:
+    """Persist an uploaded justificatif and return its relative path."""
+    filename = file.filename or ""
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ABSENCE_JUSTIFICATIF_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Extension '{ext or 'inconnue'}' non autorisée (autorisées: "
+                f"{sorted(ABSENCE_JUSTIFICATIF_EXTENSIONS)})"
+            ),
+        )
+    content = await file.read()
+    if len(content) > ABSENCE_JUSTIFICATIF_MAX_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Fichier trop volumineux (> {ABSENCE_JUSTIFICATIF_MAX_SIZE // (1024 * 1024)} MB)",
+        )
+    storage = get_storage_service()
+    relative = storage.upload_file(
+        file_content=content,
+        original_filename=filename or "justificatif",
+        folder="absence_justificatifs",
+    )
+    if relative is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Erreur lors de l'enregistrement du justificatif",
+        )
+    if previous_path:
+        storage.delete_file(previous_path)
+    return relative
+
+
 @router.post(
     "/absence-declarations",
     response_model=AbsenceDeclarationResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_absence_declaration(
-    payload: AbsenceDeclarationCreate,
+    date_debut: _date = Form(...),
+    absence_type_id: int = Form(..., gt=0),
+    date_fin: Optional[_date] = Form(None),
+    reason: Optional[str] = Form(None),
+    user_id: Optional[int] = Form(None),
+    justificatif: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("absence_declaration", "create")),
 ):
-    target_user_id = payload.user_id if payload.user_id is not None else current_user.id
+    target_user_id = user_id if user_id is not None else current_user.id
     if (
-        payload.user_id is not None
-        and payload.user_id != current_user.id
+        user_id is not None
+        and user_id != current_user.id
         and not getattr(current_user, "is_superuser", False)
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Seul un superuser peut déclarer une absence pour un autre utilisateur",
         )
+    if date_fin is not None and date_fin < date_debut:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="date_fin doit être >= date_debut",
+        )
+    justificatif_url: Optional[str] = None
+    if justificatif is not None:
+        justificatif_url = await _save_justificatif(justificatif)
     try:
         decl = await AbsenceDeclarationService.create(
             db,
             user_id=target_user_id,
-            date_debut=payload.date_debut,
-            date_fin=payload.date_fin,
-            absence_type=payload.absence_type,
-            reason=payload.reason,
-            justificatif_url=payload.justificatif_url,
+            absence_type_id=absence_type_id,
+            date_debut=date_debut,
+            date_fin=date_fin,
+            reason=reason,
+            justificatif_url=justificatif_url,
         )
     except UserNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except DeclarationNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except DeclarationStateError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return AbsenceDeclarationResponse.model_validate(decl)
 
 
@@ -636,10 +922,7 @@ async def list_absence_declarations(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     user_id: Optional[int] = Query(None),
-    decl_status: Optional[DeclarationStatus] = Query(
-        None, alias="status", description="Filtrer par statut"
-    ),
-    absence_type: Optional[AbsenceType] = Query(None),
+    absence_type_id: Optional[int] = Query(None),
     start: Optional[_date] = Query(
         None, description="Borne basse (chevauchement avec date_fin)"
     ),
@@ -647,7 +930,7 @@ async def list_absence_declarations(
         None, description="Borne haute (chevauchement avec date_debut)"
     ),
     expand: Optional[str] = Query(
-        None, description="Relations à inclure. Exemples: user, reviewed_by"
+        None, description="Relations à inclure. Exemples: user, absence_type"
     ),
 ):
     items, total = await AbsenceDeclarationService.list(
@@ -655,8 +938,7 @@ async def list_absence_declarations(
         skip=skip,
         limit=limit,
         user_id=user_id,
-        status=decl_status,
-        absence_type=absence_type,
+        absence_type_id=absence_type_id,
         start=start,
         end=end,
         expand_fields=parse_expand_param(expand),
@@ -694,7 +976,13 @@ async def get_absence_declaration(
 )
 async def update_absence_declaration(
     declaration_id: int,
-    payload: AbsenceDeclarationUpdate,
+    date_debut: Optional[_date] = Form(None),
+    date_fin: Optional[_date] = Form(None),
+    absence_type_id: Optional[int] = Form(None, gt=0),
+    reason: Optional[str] = Form(None),
+    clear_date_fin: bool = Form(False),
+    clear_justificatif: bool = Form(False),
+    justificatif: Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("absence_declaration", "update")),
 ):
@@ -707,38 +995,24 @@ async def update_absence_declaration(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Vous ne pouvez modifier que vos propres déclarations",
         )
+    new_justificatif: Optional[str] = None
+    if justificatif is not None:
+        new_justificatif = await _save_justificatif(
+            justificatif, previous_path=existing.justificatif_url
+        )
+    elif clear_justificatif and existing.justificatif_url:
+        get_storage_service().delete_file(existing.justificatif_url)
     try:
         decl = await AbsenceDeclarationService.update(
             db,
             declaration_id,
-            date_debut=payload.date_debut,
-            date_fin=payload.date_fin,
-            absence_type=payload.absence_type,
-            reason=payload.reason,
-            justificatif_url=payload.justificatif_url,
-        )
-    except DeclarationStateError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    return AbsenceDeclarationResponse.model_validate(decl)
-
-
-@router.post(
-    "/absence-declarations/{declaration_id}/review",
-    response_model=AbsenceDeclarationResponse,
-)
-async def review_absence_declaration(
-    declaration_id: int,
-    payload: AbsenceDeclarationReview,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_permission("absence_declaration", "review")),
-):
-    try:
-        decl = await AbsenceDeclarationService.review(
-            db,
-            declaration_id,
-            decision=payload.decision,
-            reviewer_id=current_user.id,
-            review_comment=payload.review_comment,
+            date_debut=date_debut,
+            date_fin=date_fin,
+            absence_type_id=absence_type_id,
+            reason=reason,
+            justificatif_url=new_justificatif,
+            clear_date_fin=clear_date_fin,
+            clear_justificatif=clear_justificatif and new_justificatif is None,
         )
     except DeclarationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
@@ -765,6 +1039,8 @@ async def delete_absence_declaration(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Vous ne pouvez supprimer que vos propres déclarations",
         )
+    if existing.justificatif_url:
+        get_storage_service().delete_file(existing.justificatif_url)
     await AbsenceDeclarationService.delete(db, declaration_id)
     return None
 
@@ -798,12 +1074,14 @@ async def create_late_declaration(
         decl = await LateDeclarationService.create(
             db,
             user_id=target_user_id,
+            reason_type_id=payload.reason_type_id,
             date_retard=payload.date_retard,
-            reason_type=payload.reason_type,
             expected_arrival_time=payload.expected_arrival_time,
             reason=payload.reason,
         )
     except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except DeclarationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     return LateDeclarationResponse.model_validate(decl)
 
@@ -818,10 +1096,7 @@ async def list_late_declarations(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     user_id: Optional[int] = Query(None),
-    decl_status: Optional[DeclarationStatus] = Query(
-        None, alias="status", description="Filtrer par statut"
-    ),
-    reason_type: Optional[LateReasonType] = Query(None),
+    reason_type_id: Optional[int] = Query(None),
     start: Optional[_date] = Query(None),
     end: Optional[_date] = Query(None),
     expand: Optional[str] = Query(None),
@@ -831,8 +1106,7 @@ async def list_late_declarations(
         skip=skip,
         limit=limit,
         user_id=user_id,
-        status=decl_status,
-        reason_type=reason_type,
+        reason_type_id=reason_type_id,
         start=start,
         end=end,
         expand_fields=parse_expand_param(expand),
@@ -889,36 +1163,11 @@ async def update_late_declaration(
             declaration_id,
             date_retard=payload.date_retard,
             expected_arrival_time=payload.expected_arrival_time,
-            reason_type=payload.reason_type,
+            reason_type_id=payload.reason_type_id,
             reason=payload.reason,
-        )
-    except DeclarationStateError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    return LateDeclarationResponse.model_validate(decl)
-
-
-@router.post(
-    "/late-declarations/{declaration_id}/review",
-    response_model=LateDeclarationResponse,
-)
-async def review_late_declaration(
-    declaration_id: int,
-    payload: LateDeclarationReview,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_permission("late_declaration", "review")),
-):
-    try:
-        decl = await LateDeclarationService.review(
-            db,
-            declaration_id,
-            decision=payload.decision,
-            reviewer_id=current_user.id,
-            review_comment=payload.review_comment,
         )
     except DeclarationNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except DeclarationStateError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return LateDeclarationResponse.model_validate(decl)
 
 
