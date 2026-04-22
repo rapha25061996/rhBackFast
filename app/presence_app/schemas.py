@@ -433,8 +433,31 @@ class GlobalStatTotals(BaseModel):
     total_minutes_late: int = 0
 
 
+class UserDayDetail(BaseModel):
+    """Compact per-day status for a user over the stats range."""
+
+    absent: str = Field(..., description='"oui" ou "non"')
+    absence_justifiee: str = Field(
+        ..., description='"oui" ou "non" (vaut "non" quand absent="non")'
+    )
+    retard: str = Field(
+        ...,
+        description=(
+            '"non", "oui" (retard déclaré) ou "oui (N min)" '
+            "(retard non déclaré, N = minutes)"
+        ),
+    )
+
+
 class GlobalUserStat(GlobalStatTotals):
     user: UserSummary
+    details: Optional[dict[date, UserDayDetail]] = Field(
+        default=None,
+        description=(
+            "Statut jour par jour sur la période. Présent uniquement "
+            "quand include_daily_details=true."
+        ),
+    )
 
 
 class GlobalStatsResponse(BaseModel):
@@ -442,5 +465,31 @@ class GlobalStatsResponse(BaseModel):
     start: date
     end: date
     filter_user_id: Optional[int] = None
+    include_daily_details: bool = False
     totals: GlobalStatTotals
     per_user: list[GlobalUserStat]
+
+
+class GlobalUserDayStat(GlobalStatTotals):
+    """Per-user counters for a single day inside the detailed stats."""
+
+    user: UserSummary
+
+
+class GlobalDayStat(GlobalStatTotals):
+    """Totals + per-user breakdown for a single day."""
+
+    date: date
+    per_user: list[GlobalUserDayStat] = []
+
+
+class GlobalStatsDetailResponse(BaseModel):
+    """Day-by-day detail for :class:`GlobalStatsResponse`."""
+
+    period: str
+    start: date
+    end: date
+    filter_user_id: Optional[int] = None
+    include_users: bool = True
+    totals: GlobalStatTotals
+    per_day: list[GlobalDayStat]
