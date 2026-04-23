@@ -6,7 +6,77 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+try:  # pragma: no cover - import guard
+    from sqlalchemy import inspect as _sa_inspect
+except Exception:  # pragma: no cover - SQLAlchemy must be installed at runtime
+    _sa_inspect = None  # type: ignore[assignment]
+
 from app.presence_app.constants import ScanMethod, ScanType
+
+
+# ---------------------------------------------------------------------------
+# Base schema that avoids triggering synchronous lazy-loads on SQLAlchemy
+# relationships when ``model_validate`` is called from an async context.
+#
+# Endpoints of this module run under :class:`sqlalchemy.ext.asyncio.AsyncSession`.
+# When a schema declares a relationship field (e.g. ``UserSummary.user_groups``
+# or ``PresenceResponse.user``), ``from_attributes=True`` makes Pydantic read the
+# attribute with ``getattr``. If that relationship was not eagerly loaded, the
+# access triggers a blocking lazy-load inside the running event loop and
+# SQLAlchemy raises ``MissingGreenlet``:
+#
+#   sqlalchemy.exc.MissingGreenlet: greenlet_spawn has not been called;
+#   can't call await_only() here. Was IO attempted in an unexpected place?
+#
+# The validator below inspects the ORM state and simply skips unloaded
+# attributes so Pydantic never reads them, leaving their schema default
+# (usually ``None`` or ``[]``). Callers that need the nested data keep using
+# the ``expand`` query parameter, which pre-loads the relationship through
+# ``apply_expansion`` / ``selectinload`` before the schema runs.
+# ---------------------------------------------------------------------------
+
+
+class _ORMModel(BaseModel):
+    """Base class for schemas fed from SQLAlchemy ORM instances.
+
+    Strips relationship attributes that have not been eagerly loaded to avoid
+    triggering an implicit async lazy-load during Pydantic validation.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _skip_unloaded_orm_attrs(cls, data: Any) -> Any:
+        if _sa_inspect is None:
+            return data
+        try:
+            state = _sa_inspect(data, raiseerr=False)
+        except Exception:
+            return data
+        if state is None or not hasattr(state, "unloaded"):
+            # Not a SQLAlchemy ORM instance (e.g. plain dict or Pydantic model).
+            return data
+
+        unloaded = set(state.unloaded)
+        if not unloaded:
+            return data
+
+        # Build an explicit dict from the declared fields, skipping relationships
+        # that have not been loaded yet. Columns are always loaded by the
+        # initial SELECT and therefore stay accessible.
+        result: dict[str, Any] = {}
+        for field_name in cls.model_fields:
+            if field_name in unloaded:
+                continue
+            if hasattr(data, field_name):
+                try:
+                    result[field_name] = getattr(data, field_name)
+                except Exception:
+                    # Defensive: never let serialization fail because of an
+                    # unexpected attribute access error.
+                    continue
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -14,7 +84,7 @@ from app.presence_app.constants import ScanMethod, ScanType
 # ---------------------------------------------------------------------------
 
 
-class UserSummary(BaseModel):
+class UserSummary(_ORMModel):
     """Minimal user payload returned whenever a presence endpoint exposes a
     related user. It is intentionally decoupled from :class:`UserResponse` in
     ``user_app.schemas`` to avoid circular imports and to give the caller only
@@ -40,15 +110,13 @@ class UserSummary(BaseModel):
     employe: Optional[Any] = None
     user_groups: Optional[list[Any]] = None
 
-    model_config = ConfigDict(from_attributes=True)
-
 
 # ---------------------------------------------------------------------------
 # Presence
 # ---------------------------------------------------------------------------
 
 
-class PresenceResponse(BaseModel):
+class PresenceResponse(_ORMModel):
     id: int
     user_id: int
     date_scan: date
@@ -63,8 +131,6 @@ class PresenceResponse(BaseModel):
     # ``expand=user.employe``). Always optional so non-expanded responses stay
     # small.
     user: Optional[UserSummary] = None
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedPresence(BaseModel):
@@ -137,15 +203,13 @@ class WorkScheduleUpdate(BaseModel):
     break_end: Optional[time] = None
 
 
-class WorkScheduleResponse(WorkScheduleBase):
+class WorkScheduleResponse(WorkScheduleBase, _ORMModel):
     id: int
     created_at: datetime
     updated_at: datetime
 
     # Populated when the caller adds ``expand=user`` (or nested paths).
     user: Optional[UserSummary] = None
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedWorkSchedule(BaseModel):
@@ -254,12 +318,10 @@ class PrAbsenceTypeUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
-class PrAbsenceTypeResponse(PrAbsenceTypeBase):
+class PrAbsenceTypeResponse(PrAbsenceTypeBase, _ORMModel):
     id: int
     created_at: datetime
     updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedPrAbsenceType(BaseModel):
@@ -287,12 +349,10 @@ class PrLateReasonTypeUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
-class PrLateReasonTypeResponse(PrLateReasonTypeBase):
+class PrLateReasonTypeResponse(PrLateReasonTypeBase, _ORMModel):
     id: int
     created_at: datetime
     updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedPrLateReasonType(BaseModel):
@@ -341,7 +401,7 @@ class AbsenceDeclarationUpdate(BaseModel):
     )
 
 
-class AbsenceDeclarationResponse(BaseModel):
+class AbsenceDeclarationResponse(_ORMModel):
     id: int
     user_id: int
     absence_type_id: int
@@ -354,8 +414,6 @@ class AbsenceDeclarationResponse(BaseModel):
 
     user: Optional[UserSummary] = None
     absence_type: Optional[PrAbsenceTypeResponse] = None
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedAbsenceDeclaration(BaseModel):
@@ -394,7 +452,7 @@ class LateDeclarationUpdate(BaseModel):
     reason: Optional[str] = None
 
 
-class LateDeclarationResponse(BaseModel):
+class LateDeclarationResponse(_ORMModel):
     id: int
     user_id: int
     reason_type_id: int
@@ -406,8 +464,6 @@ class LateDeclarationResponse(BaseModel):
 
     user: Optional[UserSummary] = None
     reason_type: Optional[PrLateReasonTypeResponse] = None
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class PaginatedLateDeclaration(BaseModel):
